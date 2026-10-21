@@ -3,7 +3,6 @@
 
 
 # Limbo
------
 Limbo is an IRC bot with the core functionality of bridging two IRC-Channels. **Currently, the bot only runs on Linux.**
 
 ## Build
