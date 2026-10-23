@@ -1,9 +1,30 @@
 #include "config.h"
 #include "logger.h"
 
+#include <stdio.h>
 #include <string.h>
 
-// TODO UNDEF values check
+static int load_server(dictionary* ini, const char* section, struct config* conf) {
+    char key[64];
+
+    snprintf(key, sizeof(key), "%s:hostname", section);
+    snprintf(conf->hostname, sizeof(conf->hostname), "%s", iniparser_getstring(ini, key, ""));
+
+    snprintf(key, sizeof(key), "%s:channel", section);
+    snprintf(conf->channel, sizeof(conf->channel), "%s", iniparser_getstring(ini, key, ""));
+
+    snprintf(key, sizeof(key), "%s:port", section);
+    conf->port = iniparser_getint(ini, key, -1);
+
+    log(DEBUG, "Load [%s]: host=%s channel=%s port=%d", section, conf->hostname, conf->channel, conf->port);
+
+    if (conf->hostname[0] == '\0' || conf->channel[0] == '\0' || conf->port <= 0 || conf->port > 65535) {
+        log(ERROR, "[%s] needs hostname, channel and a valid port", section);
+        return ERROR;
+    }
+    return 0;
+}
+
 int load_config(const char* path, struct config* conf1, struct config* conf2) {
     dictionary* ini = iniparser_load(path);
     if (ini == NULL) {
@@ -11,28 +32,10 @@ int load_config(const char* path, struct config* conf1, struct config* conf2) {
         return ERROR;
     }
 
-    // Dump whole file
-    // iniparser_dump(ini, stderr);
-
-    // LOAD VALUES
-    strncpy(conf1->hostname, iniparser_getstring(ini, "Server 1:hostname", NULL), sizeof(conf1->hostname));
-    log(DEBUG, "Load value s1 hostname: %s", conf1->hostname);
-
-    strncpy(conf2->hostname, iniparser_getstring(ini, "Server 2:hostname", NULL), sizeof(conf2->hostname));
-    log(DEBUG, "Load value s2 hostname: %s", conf2->hostname);
-
-    strncpy(conf1->channel, iniparser_getstring(ini, "Server 1:channel", NULL), sizeof(conf1->channel));
-    log(DEBUG, "Load value s1 channel: %s", conf1->channel);
-
-    strncpy(conf2->channel, iniparser_getstring(ini, "Server 2:channel", NULL), sizeof(conf2->channel));
-    log(DEBUG, "Load value s2_channel: %s", conf2->channel);
-    
-    conf1->port = iniparser_getint(ini, "Server 1:port", -1);
-    log(DEBUG, "Load value s1 port: %d", conf1->port);
-
-    conf2->port = iniparser_getint(ini, "Server 2:port", -1);
-    log(DEBUG, "Load value s2 port: %d", conf2->port);
+    int ret = 0;
+    if (load_server(ini, "Server 1", conf1) == ERROR || load_server(ini, "Server 2", conf2) == ERROR)
+        ret = ERROR;
 
     iniparser_freedict(ini);
-    return 0;
+    return ret;
 }
