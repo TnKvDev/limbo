@@ -1,13 +1,17 @@
-C_SRC = src/*.c src/*.h
-LINK =-lssl -lcrypto
-TARGET = build/limboBot
-LIB = lib/libiniparser.a
+SRC     = $(wildcard src/*.c)
+HDR     = $(wildcard src/*.h)
+INI_SRC = lib/iniparser/src/iniparser.c lib/iniparser/src/dictionary.c
+CFLAGS  = -Wall -Ilib/iniparser/src
+LINK    = -lssl -lcrypto -lpthread
+TARGET  = build/limboBot
 
-all:
-	gcc $(C_SRC) -o $(TARGET) $(LINK) $(LIB)
+all: $(TARGET)
 
-debug:
-	gcc $(C_SRC) -o $(TARGET)DBG $(LINK) $(LIB) -g
+$(TARGET): $(SRC) $(HDR) $(INI_SRC)
+	@mkdir -p build
+	gcc $(CFLAGS) $(SRC) $(INI_SRC) -o $@ $(LINK)
 
-run:
+run: $(TARGET)
 	./$(TARGET)
+
+.PHONY: all debug run
