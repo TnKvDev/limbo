@@ -1,12 +1,8 @@
-> [!WARNING]
-> NOTE THAT THIS BOT IS STILL UNDER CONSTRUCTION
-
-
 # Limbo
 Limbo is an IRC bot with the core functionality of bridging two IRC-Channels. **Currently, the bot only runs on Linux.**
 
 ## Build
-Dependencies: Make, gcc, OpenSSL, git
+Dependencies: Make, Gcc, OpenSSL, Git
 
 ```bash
     git clone git@github.com:TnKvDev/Limbo.git
