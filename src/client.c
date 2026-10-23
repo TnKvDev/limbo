@@ -1,16 +1,18 @@
 #include "client.h"
+#include "irc.h"
 #include "tls.h"
 #include "logger.h"
 
 int connect_to(const char* hostname, int port, struct srv_info* srv, SSL_CTX* ctx) {
     srv->connection_established = false;
+    srv->buflen = 0;
     log(DEBUG, "Building connection to %s", hostname);
 
     // Create socket
     srv->sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (srv->sockfd == -1) {
         log(ERROR, "Failed to create a socket for %s", hostname);
-        goto error;
+        return ERROR;
     }
     log(DEBUG, "Created socket file descriptor for %s", hostname);
 
@@ -22,8 +24,9 @@ int connect_to(const char* hostname, int port, struct srv_info* srv, SSL_CTX* ct
     }
     log(DEBUG, "Fetched information about %s", hostname);
 
-    memset(srv, 0, sizeof(struct sockaddr_in)); // Fill with zeros
-    memcpy(&(srv->srv.sin_addr.s_addr), srv->srvent->h_addr, srv->srvent->h_length); // IP
+    // Only clear the sockaddr
+    memset(&srv->srv, 0, sizeof(srv->srv));
+    memcpy(&(srv->srv.sin_addr.s_addr), srv->srvent->h_addr_list[0], srv->srvent->h_length); // IP
     srv->srv.sin_family = AF_INET; // IPv4
     srv->srv.sin_port = htons(port); // Port
 
@@ -38,13 +41,13 @@ int connect_to(const char* hostname, int port, struct srv_info* srv, SSL_CTX* ct
     // Server name indicator
     if (!SSL_set_tlsext_host_name(srv->ssl, hostname)) {
         log(ERROR, "Failed to set hostname");
-        goto error;
+        goto error_ssl;
     }
     log(DEBUG, "Set SNI to %s", hostname);
 
     if (!SSL_set1_host(srv->ssl, hostname)) {
         log(ERROR, "Failed to set certificate verification hostname");
-        goto error;
+        goto error_ssl;
     }
     log(DEBUG, "Set host to %s", hostname);
 
@@ -54,131 +57,127 @@ int connect_to(const char* hostname, int port, struct srv_info* srv, SSL_CTX* ct
     // CONNECTION
     if (connect(srv->sockfd, (struct sockaddr*)&(srv->srv), sizeof(srv->srv))) {
         log(ERROR, "Failed to connect to %s", hostname);
-        goto error;
+        goto error_ssl;
     }
-    
+
     if (perform_tls_handshake(srv->ssl) == ERROR) {
         log(ERROR, "Failed to perform handshake");
-        goto error;
+        goto error_ssl;
     }
-    
- success:
+
     srv->connection_established = true;
     return 0;
-    
+
+ error_ssl:
+    SSL_free(srv->ssl);
+    srv->ssl = NULL;
  error:
     close(srv->sockfd);
     return ERROR;
 }
 
-char* getusr(char* buf) {
-    char* usr = malloc(MAX_NICK_LENGTH);
-    char* i = strchr(buf, '!');
-    // *i = ' ';
-    
-    *i = '\0';
-    snprintf(usr, sizeof(usr), "%s", &buf[1]);
-    log(DEBUG, "USER: %s", usr);
-    *i = '!';
-    
-    return usr;
+int irc_fill(struct srv_info* srv) {
+    size_t got = 0;
+    int rc = tls_read(srv->ssl, srv->buf + srv->buflen, (int)(BUF_SIZE - srv->buflen), &got);
+    if (rc == TLS_OK)
+        srv->buflen += got;
+    return rc;
 }
 
-char* getmsg(char* buf) {
-    char* msg = malloc(MAX_MSG_LENGTH);
-    char* msg_beg = strchr(buf + 1, ':');
-    if (!msg_beg) {
-        log(ERROR, "Failed to find character in msg");
-        return NULL;
-    }
-    
-    snprintf(msg, sizeof(msg), "%s", &msg_beg[1]);
-    log(DEBUG, "MSG: %s", msg);
-    return msg;
-}
-
-// TODO
-void prepare_buf(char* buf, size_t bytes) {
-    // return array of lines
-    char* lines = malloc(bytes);
-
-    // create a safety buf to not destroy the original msg buffer
-    char* safety_buf = malloc(bytes);
-    safety_buf = memcpy(safety_buf, buf, bytes);
-    // log(DEBUG, "Safety buf: %.*s", (int)bytes, safety_buf);
-    
-    int end_reached = false;
-    int i = 0;
-    while(!i) {
-        int line_len = strcspn(buf, "\n");
-    }
-
-    free(lines);
-    free(safety_buf);
-    return;
-}
-
-void handle_data(char* buf, size_t bytes, struct config src_conf, struct config dst_conf, SSL* ssl) {
-    char* s = NULL;
-    prepare_buf(buf, bytes);
-    log(DEBUG, "Received %d bytes: %.*s", (int)bytes, (int)bytes, buf);
-
-    buf[bytes] = '\0';
-    
-    // HANDLE PING
-    if (bytes >= 5 && strncmp(buf, "PING ", 5) == 0) {
-        log(DEBUG, "Ping :DD");
-        buf[bytes] = '\0';
-        char response[64];
-        snprintf(response, sizeof(response), "PONG %s\r\n", &buf[5]);
-        if (tls_send(ssl, response) == ERROR) {
-            log(ERROR, "Failed to send ping response");
-            return;
+int irc_pop_line(struct srv_info* srv, char* line, size_t line_size) {
+    char* nl = memchr(srv->buf, '\n', srv->buflen);
+    if (nl == NULL) {
+        // A single line that fills the whole buffer can never complete: drop it
+        if (srv->buflen == BUF_SIZE) {
+            log(WARN, "Dropping overlong line from %s", srv->conf.hostname);
+            srv->buflen = 0;
         }
-        log(DEBUG, "Sent bytes: %s", response);
-
+        return 0;
     }
-    // HANDLE MESSAGES
-    else if ((s = strstr(buf, "PRIVMSG ")) != NULL) {
-        char* user = getusr(buf);
-        char* msg = getmsg(buf);
-        
-        char response[200];
-        snprintf(response, sizeof(response), "PRIVMSG %s :[%s (%s)]: %s\r\n", dst_conf.channel, user, src_conf.channel, msg);
-        if (tls_send(ssl, response) == ERROR) {
-            log(ERROR, "Failed to send PRIVMSG to target");
-        }
 
-        if (user != NULL)
-            free(user);
-        
-        if (msg != NULL)
-            free(msg);
+    size_t consumed = (size_t)(nl - srv->buf) + 1;
+    size_t len = consumed - 1;
+    if (len > 0 && srv->buf[len - 1] == '\r')
+        len--;
+    if (len >= line_size)
+        len = line_size - 1;
+
+    memcpy(line, srv->buf, len);
+    line[len] = '\0';
+
+    memmove(srv->buf, srv->buf + consumed, srv->buflen - consumed);
+    srv->buflen -= consumed;
+    return 1;
+}
+
+void handle_data(struct srv_info* src, struct srv_info* dst) {
+    char line[BUF_SIZE];
+
+    while (irc_pop_line(src, line, sizeof(line))) {
+        log(DEBUG, "[%s] %s", src->conf.hostname, line);
+
+        struct irc_msg msg;
+        if (parse_irc_line(line, &msg) == ERROR)
+            continue;
+
+        switch (classify_msg(&msg)) {
+        case PING:
+            irc_handle_ping_cmd(src->ssl, &msg);
+            break;
+        case PRIVMSG:
+            irc_handle_privmsg_cmd(src, dst, &msg);
+            break;
+        case NOTHING_INTERESTING:
+        default:
+            break;
+        }
     }
 }
 
-int reconnect(struct srv_info* srv) {
-    if (connect(srv->sockfd, (struct sockaddr*)&(srv->srv), sizeof(srv->srv))) {
-        goto error;
-    }
-    
-    if (perform_tls_handshake(srv->ssl) == ERROR) {
-        log(ERROR, "Failed to perform handshake");
-        goto error;
-    }
+int service_connection(struct srv_info* src, struct srv_info* dst) {
+    do {
+        int rc = irc_fill(src);
+        if (rc == TLS_AGAIN)
+            return 0;
+        if (rc != TLS_OK) {
+            log(WARN, "Lost connection to %s", src->conf.hostname);
+            return ERROR;
+        }
+        handle_data(src, dst);
+    } while (SSL_pending(src->ssl) > 0);
 
-    srv->connection_established = true;
     return 0;
-    
- error:
-    log(ERROR, "Failed to reconnect with %s", srv->conf.hostname);
-    return ERROR;
+}
+
+int reconnect(struct srv_info* srv, SSL_CTX* ctx) {
+    unsigned int delay = 5;
+
+    close_connection(*srv);
+    srv->connection_established = false;
+    srv->buflen = 0;
+
+    for (;;) {
+        log(WARN, "Reconnecting to %s in %u seconds", srv->conf.hostname, delay);
+        sleep(delay);
+
+        if (connect_to(srv->conf.hostname, srv->conf.port, srv, ctx) == 0) {
+            if (register_irc(srv) == 0) {
+                log(SUCCESS, "Reconnected to %s", srv->conf.hostname);
+                return 0;
+            }
+            close_connection(*srv);
+            srv->connection_established = false;
+        }
+
+        if (delay < 60)
+            delay *= 2;
+    }
 }
 
 void close_connection(struct srv_info srv) {
     if (!srv.connection_established)
         return;
-    
+
     close_tls_connection(srv.ssl);
     close(srv.sockfd);
     log(WARN, "Closed connection for %s", srv.conf.hostname);
