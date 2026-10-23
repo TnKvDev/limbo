@@ -1,6 +1,7 @@
 #ifndef TLS_H
 #define TLS_H
 
+#include <string.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509_vfy.h>
